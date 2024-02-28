@@ -1,0 +1,68 @@
+name: Pull Request Merged
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Setup python 3
+      uses: actions/setup-python@v1
+      with:
+        python-version: 3
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    # configure AWS keys
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.ACCESS_KEY }}
+        aws-secret-access-key: ${{ secrets.SECRET_ACCESS }}
+        aws-region: us-east-1
+    # validate templates
+    - name: Validate Template
+      uses: hashicorp/packer-github-actions@master
+      with:
+        command: validate
+        arguments: -syntax-only
+        target: ./packer-ami/AmazonMachineImage.pkr.hcl
+
+    # init packer packages
+    - name: Init Template
+      uses: hashicorp/packer-github-actions@master
+      with:
+        command: init
+        target: ./packer-ami/AmazonMachineImage.pkr.hcl
+        
+    # build artifact
+    - name: Build Artifact
+      uses: hashicorp/packer-github-actions@master
+      with:
+        command: build
+        arguments: "-color=false -on-error=abort "
+        target: ./packer-ami/AmazonMachineImage.pkr.hcl
+      env:
+        PACKER_LOG: 1
+        GITHUB_REPO_PATH: ${{ github.workspace }}
+
+    # install aws cli
+    - name: Install AWS Cli
+      run: sudo pip install awscli
+
+    # Update the system with latest AMI 
+    - name: Update the system with latest AMI
+      id: AMI
+      run: |
+        ID=$(aws ec2 describe-images --owners self --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text)
+        aws ec2 create-launch-template-version --launch-template-id ${{secrets.LT_ID}} --source-version '$Latest' --launch-template-data '{"ImageId":"'"$ID"'"}'
+        aws autoscaling update-auto-scaling-group --auto-scaling-group-name ${{secrets.ASG_NAME}} --launch-template LaunchTemplateName=${{secrets.LT_NAME}},Version='$Latest'
+        aws autoscaling start-instance-refresh --auto-scaling-group-name ${{secrets.ASG_NAME}}
